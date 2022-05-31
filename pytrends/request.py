@@ -78,7 +78,11 @@ class TrendReq(object):
                     continue
             else:
                 if len(self.proxies) > 0:
-                    proxy = {'https': self.proxies[self.proxy_index]}
+                    if "https" in self.proxies[self.proxy_index]:
+                        proxy = {'https': self.proxies[self.proxy_index]}
+                    else:
+                        proxy = {'http': self.proxies[self.proxy_index]}
+
                 else:
                     proxy = ''
                 try:
@@ -129,7 +133,13 @@ class TrendReq(object):
         s.headers.update({'accept-language': self.hl})
         if len(self.proxies) > 0:
             self.cookies = self.GetGoogleCookie()
-            s.proxies.update({'https': self.proxies[self.proxy_index]})
+            if "https" in self.proxies[self.proxy_index]:
+                proxy = {'https': self.proxies[self.proxy_index]}
+            else:
+                proxy = {'http': self.proxies[self.proxy_index]}
+
+            s.proxies.update(proxy)
+            
         if method == TrendReq.POST_METHOD:
             response = s.post(url, timeout=self.timeout,
                               cookies=self.cookies, **kwargs,
