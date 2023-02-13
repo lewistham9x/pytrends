@@ -1,18 +1,18 @@
 import json
-import sys
-import time
-from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
 
-from pandas.io.json._normalize import nested_to_record
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+from requests import status_codes
 
 from pytrends import exceptions
 
 from urllib.parse import quote
+
+
+BASE_TRENDS_URL = 'https://trends.google.com/trends'
 
 
 class TrendReq(object):
@@ -21,16 +21,17 @@ class TrendReq(object):
     """
     GET_METHOD = 'get'
     POST_METHOD = 'post'
-    GENERAL_URL = 'https://trends.google.com/trends/api/explore'
-    INTEREST_OVER_TIME_URL = 'https://trends.google.com/trends/api/widgetdata/multiline'
-    INTEREST_BY_REGION_URL = 'https://trends.google.com/trends/api/widgetdata/comparedgeo'
-    RELATED_QUERIES_URL = 'https://trends.google.com/trends/api/widgetdata/relatedsearches'
-    TRENDING_SEARCHES_URL = 'https://trends.google.com/trends/hottrends/visualize/internal/data'
-    TOP_CHARTS_URL = 'https://trends.google.com/trends/api/topcharts'
-    SUGGESTIONS_URL = 'https://trends.google.com/trends/api/autocomplete/'
-    CATEGORIES_URL = 'https://trends.google.com/trends/api/explore/pickers/category'
-    TODAY_SEARCHES_URL = 'https://trends.google.com/trends/api/dailytrends'
-    REALTIME_TRENDING_SEARCHES_URL = 'https://trends.google.com/trends/api/realtimetrends'
+    GENERAL_URL = f'{BASE_TRENDS_URL}/api/explore'
+    INTEREST_OVER_TIME_URL = f'{BASE_TRENDS_URL}/api/widgetdata/multiline'
+    MULTIRANGE_INTEREST_OVER_TIME_URL = f'{BASE_TRENDS_URL}/api/widgetdata/multirange'
+    INTEREST_BY_REGION_URL = f'{BASE_TRENDS_URL}/api/widgetdata/comparedgeo'
+    RELATED_QUERIES_URL = f'{BASE_TRENDS_URL}/api/widgetdata/relatedsearches'
+    TRENDING_SEARCHES_URL = f'{BASE_TRENDS_URL}/hottrends/visualize/internal/data'
+    TOP_CHARTS_URL = f'{BASE_TRENDS_URL}/api/topcharts'
+    SUGGESTIONS_URL = f'{BASE_TRENDS_URL}/api/autocomplete/'
+    CATEGORIES_URL = f'{BASE_TRENDS_URL}/api/explore/pickers/category'
+    TODAY_SEARCHES_URL = f'{BASE_TRENDS_URL}/api/dailytrends'
+    REALTIME_TRENDING_SEARCHES_URL = f'{BASE_TRENDS_URL}/api/realtimetrends'
     ERROR_CODES = (500, 502, 504, 429)
 
     def __init__(self, hl='en-US', tz=360, geo='', timeout=(2, 5), proxies='',
@@ -60,6 +61,9 @@ class TrendReq(object):
         self.related_topics_widget_list = list()
         self.related_queries_widget_list = list()
 
+        self.headers = {'accept-language': self.hl}
+        self.headers.update(self.requests_args.pop('headers', {}))
+        
     def GetGoogleCookie(self):
         """
         Gets google cookie (used for each and every proxy; once on init otherwise)
@@ -69,8 +73,7 @@ class TrendReq(object):
             if "proxies" in self.requests_args:
                 try:
                     return dict(filter(lambda i: i[0] == 'NID', requests.get(
-                        'https://trends.google.com/?geo={geo}'.format(
-                            geo=self.hl[-2:]),
+                        f'{BASE_TRENDS_URL}/?geo={self.hl[-2:]}',
                         timeout=self.timeout,
                         **self.requests_args
                     ).cookies.items()))
@@ -87,8 +90,7 @@ class TrendReq(object):
                     proxy = ''
                 try:
                     return dict(filter(lambda i: i[0] == 'NID', requests.get(
-                        'https://trends.google.com/?geo={geo}'.format(
-                            geo=self.hl[-2:]),
+                        f'{BASE_TRENDS_URL}/?geo={self.hl[-2:]}',
                         timeout=self.timeout,
                         proxies=proxy,
                         **self.requests_args
@@ -130,7 +132,7 @@ class TrendReq(object):
                           method_whitelist=frozenset(['GET', 'POST']))
             s.mount('https://', HTTPAdapter(max_retries=retry))
 
-        s.headers.update({'accept-language': self.hl})
+        s.headers.update(self.headers)
         if len(self.proxies) > 0:
             self.cookies = self.GetGoogleCookie()
             if "https" in self.proxies[self.proxy_index]:
@@ -163,11 +165,9 @@ class TrendReq(object):
             self.GetNewProxy()
             return json.loads(content)
         else:
-            # error
-            raise exceptions.ResponseError(
-                'The request failed: Google returned a '
-                'response with code {0}.'.format(response.status_code),
-                response=response)
+            if response.status_code == status_codes.codes.too_many_requests:
+                raise exceptions.TooManyRequestsError.from_response(response)
+            raise exceptions.ResponseError.from_response(response)
 
     def build_payload(self, kw_list, cat=0, timeframe='today 5-y', geo='',
                       gprop=''):
@@ -182,11 +182,17 @@ class TrendReq(object):
             'req': {'comparisonItem': [], 'category': cat, 'property': gprop}
         }
 
-        # build out json for each keyword
-        for kw in self.kw_list:
-            keyword_payload = {'keyword': kw, 'time': timeframe,
-                               'geo': self.geo}
-            self.token_payload['req']['comparisonItem'].append(keyword_payload)
+        # Check if timeframe is a list
+        if isinstance(timeframe, list):
+            for index, kw in enumerate(self.kw_list):
+                keyword_payload = {'keyword': kw, 'time': timeframe[index], 'geo': self.geo}
+                self.token_payload['req']['comparisonItem'].append(keyword_payload)
+        else: 
+            # build out json for each keyword with
+            for kw in self.kw_list:
+                keyword_payload = {'keyword': kw, 'time': timeframe, 'geo': self.geo}
+                self.token_payload['req']['comparisonItem'].append(keyword_payload)
+
         # requests will mangle this if it is not a string
         self.token_payload['req'] = json.dumps(self.token_payload['req'])
         # get tokens
@@ -275,6 +281,49 @@ class TrendReq(object):
 
         return final
 
+    def multirange_interest_over_time(self):
+        """Request data from Google's Interest Over Time section across different time ranges and return a dataframe"""
+
+        over_time_payload = {
+            # convert to string as requests will mangle
+            'req': json.dumps(self.interest_over_time_widget['request']),
+            'token': self.interest_over_time_widget['token'],
+            'tz': self.tz
+        }
+
+        # make the request and parse the returned json
+        req_json = self._get_data(
+            url=TrendReq.MULTIRANGE_INTEREST_OVER_TIME_URL,
+            method=TrendReq.GET_METHOD,
+            trim_chars=5,
+            params=over_time_payload,
+        )
+
+        df = pd.DataFrame(req_json['default']['timelineData'])
+        if (df.empty):
+            return df
+
+        result_df = pd.json_normalize(df['columnData'])
+
+        # Split dictionary columns into seperate ones
+        for i, column in enumerate(result_df.columns):
+            result_df["[" + str(i) + "] " + str(self.kw_list[i]) + " date"] = result_df[i].apply(pd.Series)["formattedTime"]
+            result_df["[" + str(i) + "] " + str(self.kw_list[i]) + " value"] = result_df[i].apply(pd.Series)["value"]   
+            result_df = result_df.drop([i], axis=1)
+        
+        # Adds a row with the averages at the top of the dataframe
+        avg_row = {}
+        for i, avg in enumerate(req_json['default']['averages']):
+            avg_row["[" + str(i) + "] " + str(self.kw_list[i]) + " date"] = "Average"
+            avg_row["[" + str(i) + "] " + str(self.kw_list[i]) + " value"] = req_json['default']['averages'][i]
+
+        result_df.loc[-1] = avg_row
+        result_df.index = result_df.index + 1
+        result_df = result_df.sort_index()
+        
+        return result_df
+
+
     def interest_by_region(self, resolution='COUNTRY', inc_low_vol=False,
                            inc_geo_code=False):
         """Request data from Google's Interest by Region section and return a dataframe"""
@@ -359,20 +408,16 @@ class TrendReq(object):
 
             # top topics
             try:
-                top_list = req_json['default']['rankedList'][0][
-                    'rankedKeyword']
-                df_top = pd.DataFrame(
-                    [nested_to_record(d, sep='_') for d in top_list])
+                top_list = req_json['default']['rankedList'][0]['rankedKeyword']
+                df_top = pd.json_normalize(top_list, sep='_')
             except KeyError:
                 # in case no top topics are found, the lines above will throw a KeyError
                 df_top = None
 
             # rising topics
             try:
-                rising_list = req_json['default']['rankedList'][1][
-                    'rankedKeyword']
-                df_rising = pd.DataFrame(
-                    [nested_to_record(d, sep='_') for d in rising_list])
+                rising_list = req_json['default']['rankedList'][1]['rankedKeyword']
+                df_rising = pd.json_normalize(rising_list, sep='_')
             except KeyError:
                 # in case no rising topics are found, the lines above will throw a KeyError
                 df_rising = None
@@ -438,8 +483,7 @@ class TrendReq(object):
         # forms = {'ajax': 1, 'pn': pn, 'htd': '', 'htv': 'l'}
         req_json = self._get_data(
             url=TrendReq.TRENDING_SEARCHES_URL,
-            method=TrendReq.GET_METHOD,
-            **self.requests_args
+            method=TrendReq.GET_METHOD
         )[pn]
         result_df = pd.DataFrame(req_json)
         return result_df
@@ -454,12 +498,8 @@ class TrendReq(object):
             params=forms,
             **self.requests_args
         )['default']['trendingSearchesDays'][0]['trendingSearches']
-        result_df = pd.DataFrame()
         # parse the returned json
-        sub_df = pd.DataFrame()
-        for trend in req_json:
-            sub_df = sub_df.append(trend['title'], ignore_index=True)
-        result_df = pd.concat([result_df, sub_df])
+        result_df = pd.DataFrame(trend['title'] for trend in req_json)
         return result_df.iloc[:, -1]
 
     def realtime_trending_searches(self, pn='US', cat='all', count =300):
@@ -518,8 +558,7 @@ class TrendReq(object):
             url=TrendReq.TOP_CHARTS_URL,
             method=TrendReq.GET_METHOD,
             trim_chars=5,
-            params=chart_payload,
-            **self.requests_args
+            params=chart_payload
         )
         try:
             df = pd.DataFrame(req_json['topCharts'][0]['listItems'])
@@ -538,8 +577,7 @@ class TrendReq(object):
             url=TrendReq.SUGGESTIONS_URL + kw_param,
             params=parameters,
             method=TrendReq.GET_METHOD,
-            trim_chars=5,
-            **self.requests_args
+            trim_chars=5
         )['default']['topics']
         return req_json
 
@@ -552,85 +590,15 @@ class TrendReq(object):
             url=TrendReq.CATEGORIES_URL,
             params=params,
             method=TrendReq.GET_METHOD,
-            trim_chars=5,
-            **self.requests_args
+            trim_chars=5
         )
         return req_json
 
-    def get_historical_interest(self, keywords, year_start=2018, month_start=1,
-                                day_start=1, hour_start=0, year_end=2018,
-                                month_end=2, day_end=1, hour_end=0, cat=0,
-                                geo='', gprop='', sleep=0, frequency='hourly'):
-        """Gets historical hourly data for interest by chunking requests to 1 week at a time (which is what Google allows)"""
-
-        # construct datetime objects - raises ValueError if invalid parameters
-        initial_start_date = start_date = datetime(year_start, month_start,
-                                                   day_start, hour_start)
-        end_date = datetime(year_end, month_end, day_end, hour_end)
-
-        # Timedeltas:
-        # 7 days for hourly
-        # ~250 days for daily (270 seems to be max but sometimes breaks?)
-        # For weekly can pull any date range so no method required here
-        
-        if frequency == 'hourly':
-            delta = timedelta(days=7)
-        elif frequency == 'daily':
-            delta = timedelta(days=250)
-        else:
-            raise(ValueError('Frequency must be hourly or daily'))
-
-        df = pd.DataFrame()
-
-        date_iterator = start_date
-        date_iterator += delta
-
-        while True:
-            # format date to comply with API call (different for hourly/daily)
-
-            if frequency == 'hourly':
-                start_date_str = start_date.strftime('%Y-%m-%dT%H')
-                date_iterator_str = date_iterator.strftime('%Y-%m-%dT%H')
-            elif frequency == 'daily':
-                start_date_str = start_date.strftime('%Y-%m-%d')
-                date_iterator_str = date_iterator.strftime('%Y-%m-%d')
-
-            tf = start_date_str + ' ' + date_iterator_str
-
-            try:
-                self.build_payload(keywords, cat, tf, geo, gprop)
-                week_df = self.interest_over_time()
-                df = df.append(week_df)
-            except Exception as e:
-                print(e)
-                pass
-
-            start_date += delta
-            date_iterator += delta
-
-            if (date_iterator > end_date):
-                # Run more days to get remaining data that would have been truncated if we stopped now
-                if frequency == 'hourly':
-                    start_date_str = start_date.strftime('%Y-%m-%dT%H')
-                    date_iterator_str = date_iterator.strftime('%Y-%m-%dT%H')
-                elif frequency == 'daily':
-                    start_date_str = start_date.strftime('%Y-%m-%d')
-                    date_iterator_str = date_iterator.strftime('%Y-%m-%d')
-
-                tf = start_date_str + ' ' + date_iterator_str
-
-                try:
-                    self.build_payload(keywords, cat, tf, geo, gprop)
-                    week_df = self.interest_over_time()
-                    df = df.append(week_df)
-                except Exception as e:
-                    print(e)
-                    pass
-                break
-
-            # just in case you are rate-limited by Google. Recommended is 60 if you are.
-            if sleep > 0:
-                time.sleep(sleep)
-
-        # Return the dataframe with results from our timeframe
-        return df.loc[initial_start_date:end_date]
+    def get_historical_interest(self, *args, **kwargs):
+        raise NotImplementedError(
+            """This method has been removed for incorrectness. It will be removed completely in v5.
+If you'd like similar functionality, please try implementing it yourself and consider submitting a pull request to add it to pytrends.
+          
+There is discussion at:
+https://github.com/GeneralMills/pytrends/pull/542"""
+        )
